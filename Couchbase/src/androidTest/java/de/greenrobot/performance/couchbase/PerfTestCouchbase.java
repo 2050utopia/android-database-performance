@@ -9,6 +9,7 @@ import com.couchbase.lite.Mapper;
 import com.couchbase.lite.Query;
 import com.couchbase.lite.QueryEnumerator;
 import com.couchbase.lite.QueryRow;
+import com.couchbase.lite.TransactionalTask;
 import com.couchbase.lite.View;
 import com.couchbase.lite.android.AndroidContext;
 import de.greenrobot.performance.BasePerfTestCase;
@@ -21,7 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * http://developer.couchbase.com/documentation/mobile/1.1.0/develop/training/build-first-android-app/index.html
+ * http://developer.couchbase.com/documentation/mobile/1.2/develop/training/build-first-android-app/index.html
  * https://github.com/couchbaselabs/ToDoLite-Android
  */
 public class PerfTestCouchbase extends BasePerfTestCase {
@@ -72,18 +73,30 @@ public class PerfTestCouchbase extends BasePerfTestCase {
         }
     }
 
-    private void indexedStringEntityQueriesRun(View indexedStringView, int count)
+    private void indexedStringEntityQueriesRun(View indexedStringView, final int count)
             throws CouchbaseLiteException {
         // create entities
-        String[] fixedRandomStrings = StringGenerator.createFixedRandomStrings(count);
-        database.beginTransaction();
-        for (int i = 0; i < count; i++) {
-            Document entity = database.getDocument(String.valueOf(i));
-            Map<String, Object> properties = new HashMap<>();
-            properties.put("indexedString", fixedRandomStrings[i]);
-            entity.putProperties(properties);
+        final String[] fixedRandomStrings = StringGenerator.createFixedRandomStrings(count);
+        boolean successful = database.runInTransaction(new TransactionalTask() {
+            @Override
+            public boolean run() {
+                for (int i = 0; i < count; i++) {
+                    Document entity = database.getDocument(String.valueOf(i));
+                    Map<String, Object> properties = new HashMap<>();
+                    properties.put("indexedString", fixedRandomStrings[i]);
+                    try {
+                        entity.putProperties(properties);
+                    } catch (CouchbaseLiteException e) {
+                        log(e.toString());
+                        return false;
+                    }
+                }
+                return true;
+            }
+        });
+        if (!successful) {
+            throw new RuntimeException("Exception while running transaction");
         }
-        database.endTransaction(true);
         log("Built and inserted entities.");
 
         // query for entities by indexed string at random
@@ -154,36 +167,61 @@ public class PerfTestCouchbase extends BasePerfTestCase {
         deleteAll();
     }
 
-    private void batchCrudRun(int count) throws Exception {
+    private void batchCrudRun(final int count) throws Exception {
         // precreate property maps for documents
-        List<Map<String, Object>> maps = new ArrayList<>(count);
+        final List<Map<String, Object>> maps = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             maps.add(createDocumentMap(i));
         }
 
         startClock();
-        List<Document> documents = new ArrayList<>(count);
-        database.beginTransaction();
-        for (int i = 0; i < count; i++) {
-            // use our own ids (use .createDocument() for random UUIDs)
-            Document document = database.getDocument(String.valueOf(i));
-            document.putProperties(maps.get(i));
-            documents.add(document);
+        final List<Document> documents = new ArrayList<>(count);
+        boolean successful = database.runInTransaction(new TransactionalTask() {
+            @Override
+            public boolean run() {
+                for (int i = 0; i < count; i++) {
+                    // use our own ids (use .createDocument() for random UUIDs)
+                    Document document = database.getDocument(String.valueOf(i));
+                    try {
+                        // TODO ut: exception with 409 (HTTP 409 conflict)
+                        document.putProperties(maps.get(i));
+                    } catch (CouchbaseLiteException e) {
+                        log(e.toString());
+                        return false;
+                    }
+                    documents.add(document);
+                }
+                return true;
+            }
+        });
+        if (!successful) {
+            throw new RuntimeException("Exception while running transaction");
         }
-        database.endTransaction(true);
         stopClock(LogMessage.BATCH_CREATE);
 
         startClock();
-        database.beginTransaction();
-        for (int i = 0; i < count; i++) {
-            Document document = documents.get(i);
-            Map<String, Object> updatedProperties = new HashMap<>();
-            // copy existing properties to get _rev property
-            updatedProperties.putAll(document.getProperties());
-            updatedProperties.putAll(maps.get(i));
-            document.putProperties(updatedProperties);
+        successful = database.runInTransaction(new TransactionalTask() {
+            @Override
+            public boolean run() {
+                for (int i = 0; i < count; i++) {
+                    Document document = documents.get(i);
+                    Map<String, Object> updatedProperties = new HashMap<>();
+                    // copy existing properties to get _rev property
+                    updatedProperties.putAll(document.getProperties());
+                    updatedProperties.putAll(maps.get(i));
+                    try {
+                        document.putProperties(updatedProperties);
+                    } catch (CouchbaseLiteException e) {
+                        log(e.toString());
+                        return false;
+                    }
+                }
+                return true;
+            }
+        });
+        if (!successful) {
+            throw new RuntimeException("Exception while running transaction");
         }
-        database.endTransaction(true);
         stopClock(LogMessage.BATCH_UPDATE);
 
         // clear the document cache to force loading properties from the database
@@ -222,13 +260,23 @@ public class PerfTestCouchbase extends BasePerfTestCase {
     private void deleteAll() throws CouchbaseLiteException {
         // query all documents, mark them as deleted
         Query query = database.createAllDocumentsQuery();
-        QueryEnumerator result = query.run();
-        database.beginTransaction();
-        while (result.hasNext()) {
-            QueryRow row = result.next();
-            row.getDocument().purge();
+        final QueryEnumerator result = query.run();
+        boolean successful = database.runInTransaction(new TransactionalTask() {
+            @Override
+            public boolean run() {
+                QueryRow row = result.next();
+                try {
+                    row.getDocument().purge();
+                } catch (CouchbaseLiteException e) {
+                    log(e.toString());
+                    return false;
+                }
+                return true;
+            }
+        });
+        if (!successful) {
+            throw new RuntimeException("Exception while running transaction");
         }
-        database.endTransaction(true);
     }
 
     private Map<String, Object> createDocumentMap(int seed) throws CouchbaseLiteException {
